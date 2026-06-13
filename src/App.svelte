@@ -44,6 +44,8 @@
       error: null,
       terminalLines: [],
       displayMode: 'Mixed',
+      filterMode: 'Off',
+      filterValue: '',
       autoScroll: true,
       sendMode: 'Ascii',
       sendContent: '',

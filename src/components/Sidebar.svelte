@@ -22,6 +22,11 @@
   let newCmdData = '';
   let newCmdIsHex = true;
 
+  let draggingCmdId = null;
+  let dragOverGroup = null;
+  let dragOverCmdId = null;
+  let dragOverPosition = null;
+
   const handlePortOpened = getContext('handlePortOpened');
 
   async function openCurrentPort() {
@@ -74,6 +79,89 @@
     if (!confirm('删除该快捷命令?')) return;
     $quickCommands = $quickCommands.filter(c => c.id !== id);
     saveQuickCommands($quickCommands);
+  }
+
+  function runCmd(cmd) {
+    const event = new CustomEvent('quick-command-send', {
+      detail: { data: cmd.data, isHex: cmd.is_hex, portFilter: null },
+    });
+    document.dispatchEvent(event);
+  }
+
+  function onDragStart(e, cmd) {
+    draggingCmdId = cmd.id;
+    dragOverGroup = null;
+    dragOverCmdId = null;
+    dragOverPosition = null;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', cmd.id);
+  }
+
+  function onDragEnd() {
+    draggingCmdId = null;
+    dragOverGroup = null;
+    dragOverCmdId = null;
+    dragOverPosition = null;
+  }
+
+  function onDragOver(e, groupName, cmdId, position) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    dragOverGroup = groupName;
+    dragOverCmdId = cmdId;
+    dragOverPosition = position;
+  }
+
+  function onGroupDragOver(e, groupName) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOverGroup !== groupName || dragOverCmdId !== null) {
+      dragOverGroup = groupName;
+      dragOverCmdId = null;
+      dragOverPosition = 'end';
+    }
+  }
+
+  function onDrop(e, targetGroup, targetCmdId, position) {
+    e.preventDefault();
+    if (!draggingCmdId) return;
+
+    const commands = [...$quickCommands];
+    const draggedIdx = commands.findIndex(c => c.id === draggingCmdId);
+    if (draggedIdx === -1) {
+      onDragEnd();
+      return;
+    }
+    const draggedCmd = commands[draggedIdx];
+
+    commands.splice(draggedIdx, 1);
+
+    let newGroup = targetGroup;
+    let insertIdx;
+
+    if (targetCmdId) {
+      const targetIdx = commands.findIndex(c => c.id === targetCmdId);
+      if (targetIdx === -1) {
+        insertIdx = commands.length;
+      } else {
+        insertIdx = position === 'after' ? targetIdx + 1 : targetIdx;
+      }
+    } else {
+      const groupCmds = commands.filter(c => c.group === targetGroup);
+      if (groupCmds.length === 0) {
+        insertIdx = commands.length;
+      } else {
+        const lastInGroup = groupCmds[groupCmds.length - 1];
+        insertIdx = commands.findIndex(c => c.id === lastInGroup.id) + 1;
+      }
+    }
+
+    const updatedCmd = { ...draggedCmd, group: newGroup };
+    commands.splice(insertIdx, 0, updatedCmd);
+
+    $quickCommands = commands;
+    saveQuickCommands(commands);
+    onDragEnd();
   }
 
   $: groupedCommands = (() => {
@@ -196,17 +284,70 @@
         <div class="empty-sb">暂无快捷命令，点击 + 添加</div>
       {/if}
       {#each Object.entries(groupedCommands) as [group, cmds]}
-        <div class="cmd-group">
+        <div
+          class="cmd-group"
+          class:drag-over-group={dragOverGroup === group && !dragOverCmdId}
+          on:dragover={(e) => onGroupDragOver(e, group)}
+          on:drop={(e) => onDrop(e, group, null, 'end')}
+        >
           <div class="cmd-group-title">{group}</div>
           <div class="cmd-buttons">
-            {#each cmds as cmd}
-              <div class="cmd-btn-wrap" title={cmd.is_hex ? 'HEX: ' + cmd.data : 'ASCII: ' + cmd.data}>
-                <button class="cmd-btn" data-cmd-id={cmd.id}>
-                  <span class="cmd-name">{cmd.name}</span>
-                  <span class="cmd-tag">{cmd.is_hex ? 'HEX' : 'ASC'}</span>
-                </button>
-                <button class="cmd-del" on:click={() => deleteCmd(cmd.id)} title="删除">×</button>
-              </div>
+            {#each cmds as cmd, i}
+              {#if draggingCmdId === cmd.id && dragOverCmdId === cmd.id}
+                {#if dragOverPosition === 'before'}
+                  <div class="drop-indicator before"></div>
+                {/if}
+                <div
+                  class="cmd-btn-wrap dragging placeholder"
+                  style="opacity:0.4"
+                >
+                  <button class="cmd-btn" disabled>
+                    <span class="cmd-name">{cmd.name}</span>
+                    <span class="cmd-tag">{cmd.is_hex ? 'HEX' : 'ASC'}</span>
+                  </button>
+                </div>
+                {#if dragOverPosition === 'after'}
+                  <div class="drop-indicator after"></div>
+                {/if}
+              {:else}
+                {#if dragOverCmdId === cmd.id && dragOverPosition === 'before'}
+                  <div class="drop-indicator before"></div>
+                {/if}
+                <div
+                  class="cmd-btn-wrap"
+                  class:drag-over={dragOverCmdId === cmd.id}
+                  draggable="true"
+                  title={cmd.is_hex ? 'HEX: ' + cmd.data : 'ASCII: ' + cmd.data}
+                  on:dragstart={(e) => onDragStart(e, cmd)}
+                  on:dragend={onDragEnd}
+                >
+                  <div
+                    class="cmd-btn"
+                    data-cmd-id={cmd.id}
+                    on:click={() => runCmd(cmd)}
+                    on:dragover={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const y = e.clientY - rect.top;
+                      const pos = y < rect.height / 2 ? 'before' : 'after';
+                      onDragOver(e, group, cmd.id, pos);
+                    }}
+                    on:drop={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const y = e.clientY - rect.top;
+                      const pos = y < rect.height / 2 ? 'before' : 'after';
+                      onDrop(e, group, cmd.id, pos);
+                    }}
+                  >
+                    <span class="drag-handle" title="拖拽排序">⋮⋮</span>
+                    <span class="cmd-name">{cmd.name}</span>
+                    <span class="cmd-tag">{cmd.is_hex ? 'HEX' : 'ASC'}</span>
+                  </div>
+                  <button class="cmd-del" on:click={() => deleteCmd(cmd.id)} title="删除">×</button>
+                </div>
+                {#if dragOverCmdId === cmd.id && dragOverPosition === 'after'}
+                  <div class="drop-indicator after"></div>
+                {/if}
+              {/if}
             {/each}
           </div>
         </div>
@@ -347,12 +488,22 @@
     color: var(--text-muted);
     font-size: 12px;
   }
+  .cmd-group {
+    padding: 4px;
+    border-radius: 6px;
+    transition: background 0.15s;
+  }
+  .cmd-group.drag-over-group {
+    background: rgba(74, 158, 255, 0.1);
+    border: 1px dashed var(--accent-blue);
+  }
   .cmd-group-title {
     font-size: 11px;
     color: var(--accent-cyan);
     margin-bottom: 6px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    padding: 0 4px;
   }
   .cmd-buttons {
     display: flex;
@@ -362,6 +513,11 @@
   .cmd-btn-wrap {
     display: flex;
     gap: 4px;
+  }
+  .cmd-btn-wrap.dragging {
+    opacity: 0.5;
+  }
+  .cmd-btn-wrap.drag-over {
   }
   .cmd-btn {
     flex: 1;
@@ -374,12 +530,30 @@
     border: 1px solid var(--border-color);
     border-radius: 4px;
     text-align: left;
-    cursor: pointer;
+    cursor: grab;
+    gap: 6px;
+    transition: all 0.15s;
   }
   .cmd-btn:hover {
     background: var(--accent-blue);
     border-color: var(--accent-blue);
     color: #fff;
+  }
+  .cmd-btn:active {
+    cursor: grabbing;
+  }
+  .drag-handle {
+    color: var(--text-muted);
+    font-size: 10px;
+    cursor: grab;
+    opacity: 0.6;
+    flex-shrink: 0;
+    letter-spacing: -1px;
+    user-select: none;
+  }
+  .cmd-btn:hover .drag-handle {
+    color: rgba(255,255,255,0.7);
+    opacity: 1;
   }
   .cmd-name {
     flex: 1;
@@ -400,6 +574,9 @@
     background: rgba(255,255,255,0.2);
     color: #fff;
   }
+  .cmd-btn.placeholder {
+    opacity: 0.4;
+  }
   .cmd-del {
     width: 24px;
     padding: 0;
@@ -414,5 +591,16 @@
     background: var(--accent-red);
     color: #fff;
     border-color: var(--accent-red);
+  }
+  .drop-indicator {
+    height: 3px;
+    margin: 1px 0;
+    background: var(--accent-blue);
+    border-radius: 2px;
+    box-shadow: 0 0 6px var(--accent-blue);
+  }
+  .drop-indicator.before {
+  }
+  .drop-indicator.after {
   }
 </style>

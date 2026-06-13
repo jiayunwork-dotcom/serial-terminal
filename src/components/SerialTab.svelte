@@ -20,10 +20,70 @@
   $: parseEnabled = currentTab?.parseEnabled || false;
   $: selectedProtocolId = currentTab?.selectedProtocolId;
   $: displayMode = currentTab?.displayMode || 'Mixed';
+  $: filterMode = currentTab?.filterMode || 'Off';
+  $: filterValue = currentTab?.filterValue || '';
   $: autoScroll = currentTab?.autoScroll !== false;
   $: sendMode = currentTab?.sendMode || 'Ascii';
   $: sendContent = currentTab?.sendContent || '';
   $: sendHistory = currentTab?.sendHistory || [];
+  $: showPreview = currentTab?.showPreview || false;
+
+  $: {
+    let total = lines.length;
+    let matched = 0;
+    if (filterMode === 'Off' || !filterValue) {
+      matched = total;
+    } else if (filterMode === 'Ascii') {
+      const kw = filterValue.toLowerCase();
+      if (kw) {
+        for (const l of lines) {
+          if (bytesToAscii(l.data || []).toLowerCase().includes(kw)) matched++;
+        }
+      } else {
+        matched = total;
+      }
+    } else if (filterMode === 'Hex') {
+      const targetBytes = hexToBytes(filterValue);
+      if (targetBytes.length > 0) {
+        for (const l of lines) {
+          if (containsBytes(l.data || [], targetBytes)) matched++;
+        }
+      } else {
+        matched = total;
+      }
+    }
+    filterStats = { matched, total };
+  }
+  let filterStats = { matched: 0, total: 0 };
+
+  function containsBytes(source, target) {
+    if (!source || !target || target.length === 0 || source.length < target.length) return false;
+    for (let i = 0; i <= source.length - target.length; i++) {
+      let ok = true;
+      for (let j = 0; j < target.length; j++) {
+        if (source[i + j] !== target[j]) { ok = false; break; }
+      }
+      if (ok) return true;
+    }
+    return false;
+  }
+
+  function lineMatchesFilter(line) {
+    if (filterMode === 'Off' || !filterValue) return true;
+    if (filterMode === 'Ascii') {
+      const kw = filterValue.toLowerCase();
+      if (!kw) return true;
+      return bytesToAscii(line.data || []).toLowerCase().includes(kw);
+    }
+    if (filterMode === 'Hex') {
+      const targetBytes = hexToBytes(filterValue);
+      if (targetBytes.length === 0) return true;
+      return containsBytes(line.data || [], targetBytes);
+    }
+    return true;
+  }
+
+  $: filteredLines = lines.filter(lineMatchesFilter);
 
   function updateTab(patch) {
     openTabs.update(tabs => tabs.map(t =>
@@ -426,6 +486,27 @@
     setTimeout(() => doSend(), 0);
   }
 
+  $: previewData = (() => {
+    if (!sendContent) return { bytes: [], hex: '', ascii: '', byteCount: 0, valid: true, error: '' };
+    let bytes, error = '';
+    if (sendMode === 'Hex') {
+      bytes = hexToBytes(sendContent);
+      if (sendContent.trim() && bytes.length === 0) {
+        error = '无效的HEX格式';
+      }
+    } else {
+      bytes = asciiToBytes(sendContent);
+    }
+    return {
+      bytes,
+      hex: bytesToHex(bytes),
+      ascii: bytesToAscii(bytes),
+      byteCount: bytes.length,
+      valid: !error,
+      error,
+    };
+  })();
+
   onMount(() => {
     document.addEventListener('quick-command-send', (e) => runQuickCommand(e.detail || {}));
   });
@@ -484,7 +565,35 @@
     <div class="terminal-area">
       <div class="rx-area">
         <div class="area-header">
-          <span>📥 接收区域 ({currentTab.rxBytes || 0} B)</span>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span>📥 接收区域 ({currentTab.rxBytes || 0} B)</span>
+            {#if filterMode !== 'Off' && filterValue}
+              <span class="filter-active-badge">
+                🔍 过滤中 {filterStats.matched}/{filterStats.total}
+              </span>
+            {/if}
+          </div>
+        </div>
+        <div class="filter-bar">
+          <div class="filter-mode-switch">
+            {#each [{v:'Off',l:'关闭'},{v:'Hex',l:'HEX过滤'},{v:'Ascii',l:'ASCII过滤'}] as opt}
+              <button
+                class="filter-mode-btn"
+                class:active={filterMode === opt.v}
+                on:click={() => updateTab({ filterMode: opt.v })}
+              >{opt.l}</button>
+            {/each}
+          </div>
+          {#if filterMode !== 'Off'}
+            <input
+              class="filter-input"
+              placeholder={filterMode === 'Hex'
+                ? '输入HEX字节序列,如: AA 55 01  (匹配包含该序列的行)'
+                : '输入ASCII关键字,大小写不敏感'}
+              value={filterValue}
+              on:input={(e) => updateTab({ filterValue: e.target.value })}
+            />
+          {/if}
         </div>
         <div
           class="terminal-content monospace scrollbar-thin"
@@ -492,10 +601,16 @@
           on:scroll={onScroll}
           on:scrollend={onScroll}
         >
-          {#if lines.length === 0}
-            <div class="no-data">等待数据...</div>
+          {#if filteredLines.length === 0}
+            <div class="no-data">
+              {#if filterMode !== 'Off' && filterValue}
+                没有匹配过滤条件的数据
+              {:else}
+                等待数据...
+              {/if}
+            </div>
           {/if}
-          {#each lines as line (line.id)}
+          {#each filteredLines as line (line.id)}
             {@const parsed = parseLine(line)}
             {@const isRx = line.direction === 'Rx'}
             {@const arrow = isRx ? '←' : '→'}
@@ -562,9 +677,46 @@
             }
             rows="4"
           />
-          <button class="send-btn primary" on:click={doSend}>
-            ⚡ 发送 <span class="kbd-hint">(Ctrl+Enter)</span>
-          </button>
+          <div class="send-row">
+            <button
+              class="preview-btn"
+              on:click={() => updateTab({ showPreview: !showPreview })}
+              title="预览即将发送的字节内容"
+            >
+              👁 预览
+            </button>
+            <button class="send-btn primary" on:click={doSend}>
+              ⚡ 发送 <span class="kbd-hint">(Ctrl+Enter)</span>
+            </button>
+          </div>
+          {#if showPreview}
+            <div class="preview-panel">
+              <div class="preview-header">
+                <span>📋 发送预览</span>
+                <span class="preview-stats">
+                  {#if !previewData.valid}
+                    <span class="preview-error">⚠ {previewData.error}</span>
+                  {:else}
+                    {previewData.byteCount} 字节
+                  {/if}
+                </span>
+              </div>
+              <div class="preview-body">
+                <div class="preview-col">
+                  <div class="preview-label">HEX 格式</div>
+                  <div class="preview-content monospace preview-hex">
+                    {previewData.hex || '(空)'}
+                  </div>
+                </div>
+                <div class="preview-col">
+                  <div class="preview-label">ASCII 格式</div>
+                  <div class="preview-content monospace preview-ascii">
+                    {previewData.ascii || '(空)'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          {/if}
         </div>
       </div>
     </div>
@@ -843,5 +995,117 @@
     font-size: 11px;
     opacity: 0.7;
     font-weight: normal;
+  }
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    flex-wrap: wrap;
+  }
+  .filter-mode-switch {
+    display: inline-flex;
+    background: var(--bg-input);
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+  }
+  .filter-mode-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    color: var(--text-secondary);
+  }
+  .filter-mode-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+  .filter-mode-btn.active {
+    background: var(--accent-cyan);
+    color: #000;
+    font-weight: 600;
+  }
+  .filter-input {
+    flex: 1;
+    min-width: 200px;
+    font-size: 12px;
+    padding: 4px 10px;
+  }
+  .filter-active-badge {
+    background: var(--accent-yellow);
+    color: #000;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+  }
+  .send-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    align-items: center;
+  }
+  .preview-btn {
+    padding: 8px 18px;
+    font-weight: 600;
+    background: var(--bg-tertiary);
+  }
+  .preview-panel {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .preview-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 12px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .preview-stats {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent-cyan);
+  }
+  .preview-error {
+    color: var(--accent-red);
+  }
+  .preview-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border-color);
+  }
+  .preview-col {
+    background: var(--bg-input);
+    padding: 8px 10px;
+  }
+  .preview-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    letter-spacing: 0.5px;
+  }
+  .preview-content {
+    font-size: 12px;
+    word-break: break-all;
+    line-height: 1.6;
+    min-height: 24px;
+  }
+  .preview-hex {
+    color: var(--accent-cyan);
+  }
+  .preview-ascii {
+    color: var(--text-primary);
   }
 </style>

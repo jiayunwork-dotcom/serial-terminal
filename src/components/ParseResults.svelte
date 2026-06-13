@@ -1,11 +1,13 @@
 <script>
   import { formatTimestamp, bytesToHex } from '../stores.js';
+  import { showSaveDialog } from '../tauriApi.js';
 
   export let parseResults = [];
   export let protocol;
 
   let selectedFrameId = null;
   let filterValue = '';
+  let exporting = false;
 
   $: sortedResults = [...parseResults].sort((a, b) => b.timestamp - a.timestamp);
 
@@ -26,16 +28,107 @@
   function copyRawHex(f) {
     navigator.clipboard.writeText(bytesToHex(f.raw_data));
   }
+
+  function buildExportData() {
+    return sortedResults.map(frame => ({
+      timestamp: frame.timestamp,
+      timestamp_str: new Date(frame.timestamp).toLocaleString(),
+      frame_length: frame.frame_length,
+      raw_hex: bytesToHex(frame.raw_data),
+      raw_bytes: Array.from(frame.raw_data || []),
+      checksum_valid: frame.checksum_valid,
+      error_message: frame.error_message || null,
+      protocol_name: protocol?.name || null,
+      fields: frame.fields.map(f => ({
+        name: f.name,
+        field_type: f.field_type,
+        offset: f.offset,
+        length: f.length,
+        raw_hex: bytesToHex(f.raw_bytes),
+        raw_bytes: Array.from(f.raw_bytes || []),
+        parsed_value: f.parsed_value,
+      })),
+    }));
+  }
+
+  async function doExportJson() {
+    if (parseResults.length === 0) {
+      alert('暂无解析数据可导出');
+      return;
+    }
+    try {
+      exporting = true;
+      const exportData = {
+        export_time: new Date().toISOString(),
+        protocol: protocol?.name || null,
+        total_frames: sortedResults.length,
+        frames: buildExportData(),
+      };
+
+      const jsonStr = JSON.stringify(exportData, null, 2);
+
+      let savePath = null;
+      try {
+        const defaultName = `protocol_frames_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        const dlg = await showSaveDialog({
+          defaultPath: defaultName,
+          filters: [{ name: 'JSON Files', extensions: ['json'] }],
+        });
+        if (dlg) {
+          savePath = typeof dlg === 'string' ? dlg : (dlg.file || dlg.path || null);
+        }
+      } catch (e) {}
+
+      if (savePath) {
+        try {
+          const { invoke } = window.__TAURI__ || {};
+          if (invoke) {
+            await invoke('write_text_file', { path: savePath, content: jsonStr });
+          }
+          alert('导出成功: ' + savePath);
+        } catch (e) {
+          exportToBrowserDownload(jsonStr);
+        }
+      } else {
+        exportToBrowserDownload(jsonStr);
+      }
+    } catch (e) {
+      console.error('导出失败', e);
+      alert('导出失败: ' + (e.message || e));
+    } finally {
+      exporting = false;
+    }
+  }
+
+  function exportToBrowserDownload(jsonStr) {
+    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `protocol_frames_${Date.now()}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    alert('已开始下载JSON文件');
+  }
 </script>
 
 <div class="parse-panel panel">
   <div class="panel-header">
     <span>📋 协议帧解析结果 ({parseResults.length})</span>
-    <input
-      class="filter-input"
-      placeholder="🔍 搜索..."
-      bind:value={filterValue}
-    />
+    <div class="panel-header-right">
+      <button
+        class="export-btn"
+        on:click={doExportJson}
+        disabled={exporting || parseResults.length === 0}
+        title="导出所有解析帧为JSON文件"
+      >
+        {exporting ? '导出中...' : '📤 导出'}
+      </button>
+      <input
+        class="filter-input"
+        placeholder="🔍 搜索..."
+        bind:value={filterValue}
+      />
+    </div>
   </div>
   <div class="panel-body parse-body">
     {#if parseResults.length === 0}
@@ -120,12 +213,32 @@
     min-height: 0;
   }
   .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 10px;
+  }
+  .panel-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .export-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    background: var(--accent-green);
+    color: #000;
+    border-color: var(--accent-green);
+    font-weight: 600;
+  }
+  .export-btn:hover:not(:disabled) {
+    background: #22c55e;
+    border-color: #22c55e;
   }
   .filter-input {
     font-size: 12px;
     padding: 4px 10px;
-    width: 200px;
+    width: 160px;
   }
   .parse-body {
     flex: 1;

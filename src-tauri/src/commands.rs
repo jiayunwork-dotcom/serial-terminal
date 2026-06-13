@@ -308,3 +308,18 @@ pub fn export_csv(request: ExportCsvRequest) -> Result<(), String> {
 
     fs::write(path, csv).map_err(|e| e.to_string())
 }
+
+#[derive(Deserialize)]
+struct WriteTextFileRequest {
+    path: String,
+    content: String,
+}
+
+#[tauri::command]
+pub fn write_text_file(request: WriteTextFileRequest) -> Result<(), String> {
+    let path = PathBuf::from(&request.path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(path, request.content).map_err(|e| e.to_string())
+}
