@@ -1,0 +1,43 @@
+[package]
+name = "serial-terminal"
+version = "1.0.0"
+description = "Cross-platform Serial Communication Terminal with Protocol Frame Parser"
+authors = ["Serial Terminal Team"]
+edition = "2021"
+rust-version = "1.70"
+
+[lib]
+name = "serial_terminal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.6", features = [
+  "dialog-open",
+  "dialog-save",
+  "fs-read-file",
+  "fs-write-file",
+  "fs-create-dir",
+  "path-all",
+  "window-all",
+  "shell-open",
+  "os-all",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tokio-serial = "5.4"
+bytes = "1.5"
+parking_lot = "0.12"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+anyhow = "1.0"
+crc32fast = "1.4"
+dirs = "5.0"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
