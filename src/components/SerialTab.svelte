@@ -1,5 +1,5 @@
 <script>
-  import { onMount, afterUpdate, tick } from 'svelte';
+  import { onMount, afterUpdate, tick, getContext } from 'svelte';
   import {
     openTabs, activeTabId, protocolTemplates,
     DISPLAY_MODE_OPTIONS, uuidv4, formatTimestamp,
@@ -9,6 +9,8 @@
   import ParseResults from './ParseResults.svelte';
 
   export let tab;
+
+  const forwardToEmulator = getContext('forwardToEmulator');
 
   let terminalEl = null;
   let needScroll = true;
@@ -456,6 +458,10 @@
         terminalLines: [...(currentTab.terminalLines || []), txLine],
         sendHistory: history,
       });
+
+      if (currentTab.config?.is_emulator && forwardToEmulator) {
+        forwardToEmulator(tab.id, bytes);
+      }
 
     } catch (e) {
       alert('发送失败: ' + (e.message || e));

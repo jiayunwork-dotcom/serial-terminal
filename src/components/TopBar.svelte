@@ -1,7 +1,7 @@
 <script>
   import {
     showChecksumTool, showAutoSend, showMonitor, showLogPanel,
-    showProtocolEditor, sidebarOpen, statusBarData, refreshingPorts,
+    showProtocolEditor, sidebarOpen, emulatorPanelOpen, statusBarData, refreshingPorts,
   } from '../stores.js';
 
   export let onRefreshPorts;
@@ -71,6 +71,10 @@
     <div class="divider-v"></div>
     <button class="tb-btn" class:recording={$statusBarData.isRecording} on:click={startStopRecording}>
       {$statusBarData.isRecording ? `⏹ 停止录制 (${formatElapsed($statusBarData.elapsed)})` : '⏺ 开始录制'}
+    </button>
+    <div class="divider-v"></div>
+    <button class="tb-btn" class:active={$emulatorPanelOpen} on:click={() => $emulatorPanelOpen = !$emulatorPanelOpen}>
+      🧪 协议仿真器
     </button>
     <button class="tb-btn" on:click={() => $showLogPanel = true}>
       📂 日志/回放
@@ -155,6 +159,10 @@
   .tb-btn:hover {
     background: var(--accent-blue);
     border-color: var(--accent-blue);
+  }
+  .tb-btn.active {
+    background: var(--accent-purple);
+    border-color: var(--accent-purple);
   }
   .tb-btn.recording {
     background: var(--accent-red);

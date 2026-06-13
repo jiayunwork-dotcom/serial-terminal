@@ -2,7 +2,7 @@
   import { onMount, onDestroy, setContext } from 'svelte';
   import {
     serialPorts, refreshingPorts, openTabs, activeTabId, statusBarData,
-    showChecksumTool, showAutoSend, showMonitor, showLogPanel, showProtocolEditor, sidebarOpen,
+    showChecksumTool, showAutoSend, showMonitor, showLogPanel, showProtocolEditor, sidebarOpen, emulatorPanelOpen,
     quickCommands, protocolTemplates, uuidv4, formatTimestamp, DEFAULT_BAUD_RATES
   } from './stores.js';
   import {
@@ -19,9 +19,28 @@
   import AutoSendPanel from './components/AutoSendPanel.svelte';
   import MonitorPanel from './components/MonitorPanel.svelte';
   import LogPanel from './components/LogPanel.svelte';
+  import EmulatorPanel from './components/EmulatorPanel.svelte';
 
   let unsubs = [];
   let tauriAvailable = false;
+  let emulatorPanelRef = null;
+
+  function injectHandleSerialData(evt) {
+    handleSerialData(evt);
+  }
+
+  function forwardToEmulator(portId, bytes) {
+    if (!emulatorPanelRef || !$emulatorPanelOpen) return;
+    const emuState = $openTabs.find(t => t.id === portId);
+    if (!emuState || !emuState.config?.is_emulator) return;
+    try {
+      if (emulatorPanelRef.forwardHostToDevice) {
+        emulatorPanelRef.forwardHostToDevice(bytes);
+      }
+    } catch (e) {
+      console.warn('Forward to emulator failed:', e);
+    }
+  }
 
   async function refreshPorts() {
     $refreshingPorts = true;
@@ -226,6 +245,8 @@
   setContext('refreshPorts', refreshPorts);
   setContext('handlePortOpened', handlePortOpened);
   setContext('handlePortClosed', handlePortClosed);
+  setContext('injectHandleSerialData', injectHandleSerialData);
+  setContext('forwardToEmulator', forwardToEmulator);
 
   onDestroy(() => {
     for (const u of unsubs) {
@@ -254,6 +275,7 @@
             <div class="empty-tips">
               <div>💡 提示：支持同时打开多个串口，每个串口独立一个标签页</div>
               <div>💡 提示：内置协议帧解析、校验计算、数据监控等多种工具</div>
+              <div>🧪 提示：点击顶部"协议仿真器"按钮可启动设备仿真功能</div>
             </div>
           </div>
         {:else}
@@ -265,6 +287,13 @@
         {/if}
       </div>
     </div>
+
+    {#if $emulatorPanelOpen}
+      <EmulatorPanel
+        bind:this={emulatorPanelRef}
+        onClose={() => $emulatorPanelOpen = false}
+      />
+    {/if}
   </div>
 
   <StatusBar />

@@ -18,6 +18,24 @@ export const showMonitor = writable(false);
 export const showLogPanel = writable(false);
 export const showProtocolEditor = writable(false);
 export const sidebarOpen = writable(true);
+export const emulatorPanelOpen = writable(false);
+export const emulatorState = writable({
+  isRunning: false,
+  selectedTemplate: 'modbus_rtu',
+  currentScript: null,
+  hostPortId: null,
+  hostPortName: '',
+  deviceLogs: [],
+  variables: [],
+  registerView: { startAddr: 0, countPerPage: 20 },
+  stats: {
+    requestsProcessed: 0,
+    responsesSent: 0,
+    matchFailures: 0,
+    averageLatencyMs: 0,
+  },
+});
+export const showScriptEditor = writable(false);
 
 export const quickCommands = writable([]);
 export const protocolTemplates = writable([]);

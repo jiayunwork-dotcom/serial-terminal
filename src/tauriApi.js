@@ -70,6 +70,9 @@ export async function openSerialPort(portName, config) {
 }
 
 export async function closeSerialPort(portId) {
+  if (portId && (portId.startsWith('vpipe-') || portId.startsWith('emu-'))) {
+    return { success: true, note: 'emulator pipe bypass' };
+  }
   try {
     return await invoke('close_serial_port', { port_id: portId });
   } catch (e) {
@@ -79,6 +82,9 @@ export async function closeSerialPort(portId) {
 }
 
 export async function sendSerialData(portId, data) {
+  if (portId && (portId.startsWith('vpipe-') || portId.startsWith('emu-'))) {
+    return { success: true, note: 'emulator pipe bypass' };
+  }
   try {
     return await invoke('send_data', { request: { port_id: portId, data: Array.from(data) } });
   } catch (e) {
