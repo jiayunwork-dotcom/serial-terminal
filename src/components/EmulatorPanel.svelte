@@ -16,6 +16,7 @@
   const handlePortOpened = getContext('handlePortOpened');
   const handlePortClosed = getContext('handlePortClosed');
   const handleSerialData = getContext && getContext('injectHandleSerialData') ? getContext('injectHandleSerialData') : null;
+  const injectEmulatorResponseToMain = getContext && getContext('injectEmulatorResponseToMain') ? getContext('injectEmulatorResponseToMain') : null;
 
   let pipe = null;
   let engine = new ScriptEngine();
@@ -30,6 +31,14 @@
   let editingVarValue = '';
   let deviceSendHex = '';
   let logDisplayMode = 'Mixed';
+  let latencyCanvas = null;
+  let latencyCanvasCtx = null;
+  let latencyDrawTimer = null;
+  let recordingStartTs = 0;
+  let playbackTimers = [];
+  let newScenarioName = '';
+  let showSaveScenarioDialog = false;
+  const SCENARIO_STORAGE_KEY = 'emulator_scenarios_v1';
 
   let selectedTemplate = $emulatorState.selectedTemplate || 'modbus_rtu';
 
@@ -76,7 +85,15 @@
       const logs = [...(s.deviceLogs || []), line];
       const maxLogs = 5000;
       const trimmed = logs.length > maxLogs ? logs.slice(logs.length - maxLogs) : logs;
-      return { ...s, deviceLogs: trimmed };
+      let recordedFrames = s.recordedFrames || [];
+      if (s.isRecording && (direction === 'Rx' || direction === 'Tx')) {
+        recordedFrames = [...recordedFrames, {
+          ts: line.timestamp,
+          direction,
+          data: line.data,
+        }];
+      }
+      return { ...s, deviceLogs: trimmed, recordedFrames };
     });
   }
 
@@ -124,6 +141,9 @@
         if (pipe && pipe.isOpen) {
           pipe.writeToHost(bytes);
           addDeviceLog('Tx', bytes);
+        }
+        if (injectEmulatorResponseToMain) {
+          try { injectEmulatorResponseToMain(bytes); } catch (e) {}
         }
       };
 
@@ -373,6 +393,195 @@
     refreshStats();
   }
 
+  function startRecording() {
+    if (!isRunning) {
+      alert('请先启动仿真器');
+      return;
+    }
+    recordingStartTs = Date.now();
+    emulatorState.update(s => ({ ...s, isRecording: true, recordedFrames: [] }));
+  }
+
+  function stopRecording() {
+    emulatorState.update(s => ({ ...s, isRecording: false }));
+    showSaveScenarioDialog = true;
+    newScenarioName = '场景_' + new Date().toLocaleString().replace(/[\/:]/g, '-');
+  }
+
+  function loadSavedScenarios() {
+    try {
+      const raw = localStorage.getItem(SCENARIO_STORAGE_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      emulatorState.update(s => ({ ...s, savedScenarios: list }));
+    } catch (e) {
+      emulatorState.update(s => ({ ...s, savedScenarios: [] }));
+    }
+  }
+
+  function saveCurrentScenario() {
+    const name = newScenarioName.trim();
+    if (!name) {
+      alert('请输入场景名称');
+      return;
+    }
+    const recordedFrames = $emulatorState.recordedFrames || [];
+    if (recordedFrames.length === 0) {
+      alert('没有录制到任何帧数据');
+      showSaveScenarioDialog = false;
+      return;
+    }
+    const scenario = {
+      id: 'scn_' + Date.now(),
+      name,
+      createdAt: Date.now(),
+      frames: recordedFrames,
+      durationMs: recordedFrames.length > 0
+        ? recordedFrames[recordedFrames.length - 1].ts - recordedFrames[0].ts
+        : 0,
+    };
+    try {
+      const raw = localStorage.getItem(SCENARIO_STORAGE_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      list.push(scenario);
+      localStorage.setItem(SCENARIO_STORAGE_KEY, JSON.stringify(list));
+      emulatorState.update(s => ({ ...s, savedScenarios: list }));
+      showSaveScenarioDialog = false;
+      alert('✅ 场景已保存: ' + name);
+    } catch (e) {
+      alert('保存失败: ' + e.message);
+    }
+  }
+
+  function cancelSaveScenario() {
+    showSaveScenarioDialog = false;
+    emulatorState.update(s => ({ ...s, recordedFrames: [] }));
+  }
+
+  function deleteScenario(id) {
+    if (!confirm('确定要删除该场景吗？')) return;
+    try {
+      const raw = localStorage.getItem(SCENARIO_STORAGE_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      const filtered = list.filter(s => s.id !== id);
+      localStorage.setItem(SCENARIO_STORAGE_KEY, JSON.stringify(filtered));
+      emulatorState.update(s => ({ ...s, savedScenarios: filtered }));
+    } catch (e) {}
+  }
+
+  function playScenario(scenario) {
+    if (!isRunning) {
+      alert('请先启动仿真器');
+      return;
+    }
+    stopPlayback();
+    const txFrames = (scenario.frames || []).filter(f => f.direction === 'Tx');
+    if (txFrames.length === 0) {
+      alert('该场景中没有设备端发送的帧（Tx）');
+      return;
+    }
+    emulatorState.update(s => ({ ...s, isPlaying: true, playingScenarioId: scenario.id }));
+    const baseTs = scenario.frames[0].ts;
+    for (const f of txFrames) {
+      const delay = f.ts - baseTs;
+      const t = setTimeout(() => {
+        if (!pipe || !isRunning) return;
+        pipe.writeToHost(f.data);
+        addDeviceLog('Tx', f.data);
+        if (injectEmulatorResponseToMain) {
+          try { injectEmulatorResponseToMain(f.data); } catch (e) {}
+        }
+      }, delay);
+      playbackTimers.push(t);
+    }
+    const totalDelay = txFrames.length > 0
+      ? (txFrames[txFrames.length - 1].ts - baseTs) + 50
+      : 50;
+    const endTimer = setTimeout(() => {
+      emulatorState.update(s => ({ ...s, isPlaying: false, playingScenarioId: null }));
+    }, totalDelay);
+    playbackTimers.push(endTimer);
+  }
+
+  function stopPlayback() {
+    for (const t of playbackTimers) clearTimeout(t);
+    playbackTimers = [];
+    emulatorState.update(s => ({ ...s, isPlaying: false, playingScenarioId: null }));
+  }
+
+  function setupLatencyCanvas() {
+    if (!latencyCanvas) return;
+    latencyCanvasCtx = latencyCanvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const rect = latencyCanvas.getBoundingClientRect();
+    latencyCanvas.width = rect.width * dpr;
+    latencyCanvas.height = 80 * dpr;
+    latencyCanvasCtx.scale(dpr, dpr);
+    drawLatencyChart();
+  }
+
+  function drawLatencyChart() {
+    if (!latencyCanvasCtx) return;
+    const ctx = latencyCanvasCtx;
+    const dpr = window.devicePixelRatio || 1;
+    const w = latencyCanvas.width / dpr;
+    const h = 80;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = 'rgba(30, 41, 59, 0.5)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+      const y = (h / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+    }
+    const latencies = (engine.getStats().responseLatencies || []).filter(
+      item => Date.now() - (typeof item === 'number' ? (Date.now() - 60000) : item.ts) <= 60000
+    );
+    const now = Date.now();
+    const windowMs = 60000;
+    const data = latencies.filter(item => {
+      const ts = typeof item === 'number' ? now : item.ts;
+      return now - ts <= windowMs;
+    }).map(item => ({
+      ts: typeof item === 'number' ? now : item.ts,
+      latency: typeof item === 'number' ? item : item.latency,
+    }));
+    if (data.length === 0) {
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.6)';
+      ctx.font = '11px monospace';
+      ctx.fillText('等待响应数据...', 6, h / 2 + 4);
+      return;
+    }
+    const maxLatency = Math.max(...data.map(d => d.latency), 50);
+    ctx.strokeStyle = '#22d3ee';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) {
+      const d = data[i];
+      const x = ((d.ts - (now - windowMs)) / windowMs) * w;
+      const y = h - (d.latency / maxLatency) * (h - 8) - 4;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(34, 211, 238, 0.15)';
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(34, 211, 238, 0.1)';
+    ctx.fill();
+    ctx.fillStyle = '#22d3ee';
+    ctx.font = '10px monospace';
+    ctx.fillText(maxLatency.toFixed(0) + 'ms', 4, 12);
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.7)';
+    ctx.fillText('0ms', 4, h - 2);
+    ctx.fillText('-60s', 4, h / 2 + 4);
+    ctx.fillText('now', w - 28, h / 2 + 4);
+  }
+
   function navigateReg(dir) {
     emulatorState.update(s => {
       const tpl = BUILTIN_TEMPLATES[selectedTemplate];
@@ -447,10 +656,19 @@
       } catch (e) {}
       buildVariableList();
     }
+    loadSavedScenarios();
+    latencyDrawTimer = setInterval(() => {
+      drawLatencyChart();
+    }, 500);
+    setTimeout(() => setupLatencyCanvas(), 50);
+    window.addEventListener('resize', setupLatencyCanvas);
   });
 
   onDestroy(() => {
     if (statsTimer) clearInterval(statsTimer);
+    if (latencyDrawTimer) clearInterval(latencyDrawTimer);
+    stopPlayback();
+    window.removeEventListener('resize', setupLatencyCanvas);
     if (isRunning) {
       stopEmulator();
     }
@@ -733,8 +951,121 @@
           <div class="stat-label">平均响应延迟</div>
         </div>
       </div>
+      <div class="latency-chart-wrap">
+        <canvas
+          class="latency-canvas"
+          bind:this={latencyCanvas}
+          height="80"
+        ></canvas>
+      </div>
+    </div>
+
+    <div class="ep-section">
+      <div class="ep-section-title">
+        <span>🎬 场景录制与回放</span>
+        <div class="ep-title-tools">
+          {#if $emulatorState.isRecording}
+            <span class="rec-indicator">● 录制中</span>
+          {/if}
+          {#if $emulatorState.isPlaying}
+            <span class="play-indicator">▶ 回放中</span>
+          {/if}
+        </div>
+      </div>
+      <div class="rec-btn-row">
+        {#if !$emulatorState.isRecording}
+          <button
+            class="btn-secondary"
+            on:click={startRecording}
+            disabled={!isRunning || $emulatorState.isPlaying}
+          >
+            ⏺ 开始录制
+          </button>
+        {:else}
+          <button
+            class="btn-danger"
+            on:click={stopRecording}
+          >
+            ⏹ 停止录制
+          </button>
+        {/if}
+        {#if $emulatorState.isPlaying}
+          <button
+            class="btn-secondary"
+            on:click={stopPlayback}
+          >
+            ⏹ 停止回放
+          </button>
+        {/if}
+      </div>
+      {#if $emulatorState.recordedFrames && $emulatorState.recordedFrames.length > 0 && !$emulatorState.isRecording}
+        <div class="record-info">
+          已录制 {$emulatorState.recordedFrames.length} 帧
+        </div>
+      {/if}
+      <div class="scenario-list">
+        <div class="scenario-list-title">已保存场景：</div>
+        {#if !$emulatorState.savedScenarios || $emulatorState.savedScenarios.length === 0}
+          <div class="scenario-empty">暂无保存的场景</div>
+        {:else}
+          {#each $emulatorState.savedScenarios as scn}
+            <div class="scenario-item" class:active={$emulatorState.playingScenarioId === scn.id}>
+              <div class="scenario-info">
+                <div class="scenario-name">{scn.name}</div>
+                <div class="scenario-meta">
+                  {new Date(scn.createdAt).toLocaleString()} · {scn.frames?.length || 0} 帧 · {(scn.durationMs / 1000).toFixed(1)}s
+                </div>
+              </div>
+              <div class="scenario-actions">
+                <button
+                  class="ep-btn-sm"
+                  on:click={() => playScenario(scn)}
+                  disabled={!isRunning || $emulatorState.isRecording || $emulatorState.isPlaying}
+                  title="回放该场景"
+                >
+                  ▶
+                </button>
+                <button
+                  class="ep-btn-sm"
+                  on:click={() => deleteScenario(scn.id)}
+                  title="删除该场景"
+                >
+                  🗑
+                </button>
+              </div>
+            </div>
+          {/each}
+        {/if}
+      </div>
     </div>
   </div>
+
+  {#if showSaveScenarioDialog}
+    <div class="modal-backdrop" on:click|self={cancelSaveScenario}>
+      <div class="save-scn-modal">
+        <div class="modal-header">
+          <h3>💾 保存录制场景</h3>
+          <button class="close-btn" on:click={cancelSaveScenario}>×</button>
+        </div>
+        <div class="modal-body">
+          <label class="scn-label">场景名称</label>
+          <input
+            type="text"
+            class="scn-input"
+            bind:value={newScenarioName}
+            placeholder="请输入场景名称"
+          />
+          <div class="scn-info">
+            共录制 {$emulatorState.recordedFrames?.length || 0} 帧数据
+          </div>
+          <div class="scn-actions">
+            <button class="btn-secondary" on:click={cancelSaveScenario}>取消</button>
+            <button class="btn-primary" on:click={saveCurrentScenario}>✅ 保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if showEditor}
     <ScriptEditor
@@ -1251,5 +1582,219 @@
   button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .latency-chart-wrap {
+    margin-top: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg-input);
+  }
+
+  .latency-canvas {
+    width: 100%;
+    height: 80px;
+    display: block;
+  }
+
+  .rec-btn-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .rec-indicator {
+    color: var(--accent-red);
+    font-size: 12px;
+    font-weight: 600;
+    animation: blink 1s infinite;
+  }
+
+  .play-indicator {
+    color: var(--accent-green);
+    font-size: 12px;
+    font-weight: 600;
+    animation: blink 1s infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .record-info {
+    font-size: 12px;
+    color: var(--accent-cyan);
+    margin-bottom: 8px;
+    padding: 4px 8px;
+    background: rgba(34, 211, 238, 0.1);
+    border-radius: 4px;
+  }
+
+  .scenario-list {
+    margin-top: 4px;
+  }
+
+  .scenario-list-title {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    font-weight: 500;
+  }
+
+  .scenario-empty {
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 12px;
+    text-align: center;
+    background: var(--bg-input);
+    border-radius: 4px;
+  }
+
+  .scenario-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    transition: all 0.15s;
+  }
+
+  .scenario-item:hover {
+    border-color: var(--accent-blue);
+  }
+
+  .scenario-item.active {
+    border-color: var(--accent-green);
+    background: rgba(74, 222, 128, 0.05);
+  }
+
+  .scenario-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .scenario-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .scenario-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .scenario-actions {
+    display: flex;
+    gap: 4px;
+    margin-left: 8px;
+    flex-shrink: 0;
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(3px);
+  }
+
+  .save-scn-modal {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    width: 90%;
+    max-width: 400px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 18px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .modal-header h3 {
+    font-size: 15px;
+    color: var(--text-primary);
+    margin: 0;
+  }
+
+  .close-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 22px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .close-btn:hover {
+    background: var(--accent-red);
+    color: #fff;
+  }
+
+  .modal-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .scn-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .scn-input {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 13px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+  }
+
+  .scn-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+  }
+
+  .scn-info {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .scn-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
   }
 </style>

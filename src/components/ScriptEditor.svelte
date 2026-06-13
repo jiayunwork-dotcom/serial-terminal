@@ -171,7 +171,19 @@
             <div class="help-item"><code>custom</code> - 自定义处理函数, 字段: handler(函数名)</div>
             <div class="help-item"><code>set_state</code> - 仅修改状态, 字段: state_key, state_value</div>
             <div class="help-item"><code>sequence</code> - 动作序列, 字段: steps([{'delay_ms'},{'data/handler'}...])</div>
+            <div class="help-item"><code>conditional</code> - 条件分支, 字段: conditions([{'{'}expression,action{'}'}...]), fallback_action</div>
             <div class="help-item"><code>delay_ms</code> - 任意动作根节点附加延迟发送</div>
+          </div>
+          <div class="help-section">
+            <div class="help-h">规则可选字段</div>
+            <div class="help-item"><code>priority</code> - 数字, 越大优先级越高(默认0), 同优先级按定义顺序</div>
+            <div class="help-item"><code>exclusive</code> - 布尔, 默认true, false时允许与更高优先级规则同时执行(旁路监听)</div>
+          </div>
+          <div class="help-section">
+            <div class="help-h">条件表达式支持</div>
+            <div class="help-item"><code>比较运算符</code> &gt; &lt; &gt;= &lt;= == !=</div>
+            <div class="help-item"><code>逻辑运算符</code> &amp;&amp; || !</div>
+            <div class="help-item"><code>引用变量</code> state寄存器如 state.registers[0], 帧字节如 rawFrame[2]</div>
           </div>
         </div>
       </div>

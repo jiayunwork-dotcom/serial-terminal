@@ -459,7 +459,7 @@
         sendHistory: history,
       });
 
-      if (currentTab.config?.is_emulator && forwardToEmulator) {
+      if (forwardToEmulator) {
         forwardToEmulator(tab.id, bytes);
       }
 

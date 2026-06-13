@@ -33,7 +33,13 @@ export const emulatorState = writable({
     responsesSent: 0,
     matchFailures: 0,
     averageLatencyMs: 0,
+    responseLatencies: [],
   },
+  isRecording: false,
+  recordedFrames: [],
+  savedScenarios: [],
+  isPlaying: false,
+  playingScenarioId: null,
 });
 export const showScriptEditor = writable(false);
 

@@ -31,8 +31,7 @@
 
   function forwardToEmulator(portId, bytes) {
     if (!emulatorPanelRef || !$emulatorPanelOpen) return;
-    const emuState = $openTabs.find(t => t.id === portId);
-    if (!emuState || !emuState.config?.is_emulator) return;
+    if (!$emulatorState.isRunning) return;
     try {
       if (emulatorPanelRef.forwardHostToDevice) {
         emulatorPanelRef.forwardHostToDevice(bytes);
@@ -40,6 +39,22 @@
     } catch (e) {
       console.warn('Forward to emulator failed:', e);
     }
+  }
+
+  function injectEmulatorResponseToMain(bytes) {
+    if (!$emulatorState.isRunning) return;
+    const targetTabId = $activeTabId;
+    if (!targetTabId) return;
+    const tab = $openTabs.find(t => t.id === targetTabId);
+    if (!tab) return;
+    if (tab.config?.is_emulator) return;
+    handleSerialData({
+      portId: targetTabId,
+      portName: tab.portName,
+      direction: 'Rx',
+      timestamp: Date.now(),
+      data: bytes,
+    });
   }
 
   async function refreshPorts() {
@@ -247,6 +262,7 @@
   setContext('handlePortClosed', handlePortClosed);
   setContext('injectHandleSerialData', injectHandleSerialData);
   setContext('forwardToEmulator', forwardToEmulator);
+  setContext('injectEmulatorResponseToMain', injectEmulatorResponseToMain);
 
   onDestroy(() => {
     for (const u of unsubs) {

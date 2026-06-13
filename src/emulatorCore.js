@@ -396,6 +396,14 @@ function evalExpr(expr, ctx) {
   }
 }
 
+function evalBooleanExpr(expr, ctx) {
+  const result = evalExpr(expr, ctx);
+  if (typeof result === 'boolean') return result;
+  if (typeof result === 'number') return result !== 0;
+  if (typeof result === 'string') return result.length > 0;
+  return !!result;
+}
+
 function expandTemplate(tpl, ctx) {
   if (typeof tpl === 'string') {
     return tpl.replace(/\$\{([^}]+)\}/g, (_, expr) => {
@@ -727,9 +735,11 @@ export class ScriptEngine {
     ctx.rawFrame = frame;
     ctx.ascii = bytesToString(frame);
 
-    let matched = false;
-    for (const rule of this.rules) {
+    const matchedRules = [];
+    for (let i = 0; i < this.rules.length; i++) {
+      const rule = this.rules[i];
       const trig = rule.trigger;
+      let matched = false;
       if (trig.type === 'frame_match') {
         if (matchFramePattern(frame, trig.pattern, trig.mask, trig.min_length)) {
           matched = true;
@@ -747,22 +757,51 @@ export class ScriptEngine {
         if (ascii.includes(kw)) matched = true;
       }
       if (matched) {
-        if (this.onLog) this.onLog({ type: 'rule_match', ruleId: rule.id, ruleName: rule.name });
-        await this.executeAction(rule, ctx, frame, rawBytes);
-        const latency = Date.now() - startTs;
-        this.stats.responseLatencies.push(latency);
-        if (this.stats.responseLatencies.length > 1000) {
-          this.stats.responseLatencies.shift();
-        }
-        return { matched: true, rule };
+        matchedRules.push({ rule, index: i });
       }
     }
 
-    if (!matched) {
+    if (matchedRules.length === 0) {
       this.stats.matchFailures++;
       if (this.onLog) this.onLog({ type: 'no_match', frame: [...frame] });
+      return { matched: false };
     }
-    return { matched: false };
+
+    matchedRules.sort((a, b) => {
+      const pa = typeof a.rule.priority === 'number' ? a.rule.priority : 0;
+      const pb = typeof b.rule.priority === 'number' ? b.rule.priority : 0;
+      if (pb !== pa) return pb - pa;
+      return a.index - b.index;
+    });
+
+    const topPriority = typeof matchedRules[0].rule.priority === 'number' ? matchedRules[0].rule.priority : 0;
+    const rulesToExecute = [];
+    for (const mr of matchedRules) {
+      const p = typeof mr.rule.priority === 'number' ? mr.rule.priority : 0;
+      const exclusive = mr.rule.exclusive !== false;
+      if (p === topPriority) {
+        rulesToExecute.push(mr);
+        if (exclusive) break;
+      } else if (p < topPriority) {
+        if (!exclusive) {
+          rulesToExecute.push(mr);
+        } else {
+          break;
+        }
+      }
+    }
+
+    for (const mr of rulesToExecute) {
+      if (this.onLog) this.onLog({ type: 'rule_match', ruleId: mr.rule.id, ruleName: mr.rule.name });
+      await this.executeAction(mr.rule, ctx, frame, rawBytes);
+    }
+
+    const latency = Date.now() - startTs;
+    this.stats.responseLatencies.push({ ts: Date.now(), latency });
+    if (this.stats.responseLatencies.length > 1000) {
+      this.stats.responseLatencies.shift();
+    }
+    return { matched: true, rules: rulesToExecute.map(mr => mr.rule) };
   }
 
   async executeAction(rule, ctx, frame) {
@@ -828,6 +867,23 @@ export class ScriptEngine {
           }
         }
         return;
+      } else if (action.type === 'conditional') {
+        const conditions = action.conditions || [];
+        let chosenAction = null;
+        for (const cond of conditions) {
+          if (cond.expression && evalBooleanExpr(cond.expression, ctx)) {
+            chosenAction = cond.action;
+            break;
+          }
+        }
+        if (!chosenAction && action.fallback_action) {
+          chosenAction = action.fallback_action;
+        }
+        if (chosenAction) {
+          const wrappedRule = { ...rule, action: chosenAction };
+          await this.executeAction(wrappedRule, ctx, frame);
+          return;
+        }
       }
 
       if (action.state_changes && Array.isArray(action.state_changes)) {
@@ -867,7 +923,9 @@ export class ScriptEngine {
   }
 
   getStats() {
-    const latencies = this.stats.responseLatencies;
+    const latencies = this.stats.responseLatencies.map(item =>
+      typeof item === 'number' ? item : item.latency
+    );
     const avgLatency = latencies.length > 0
       ? latencies.reduce((a, b) => a + b, 0) / latencies.length
       : 0;
@@ -876,6 +934,7 @@ export class ScriptEngine {
       responsesSent: this.stats.responsesSent,
       matchFailures: this.stats.matchFailures,
       averageLatencyMs: Math.round(avgLatency * 10) / 10,
+      responseLatencies: this.stats.responseLatencies,
     };
   }
 
@@ -910,9 +969,37 @@ export function validateScript(jsonText) {
       if (!validTriggers.includes(rule.trigger.type)) {
         return { valid: false, error: `规则[${rule.id}]未知触发类型: ${rule.trigger.type}` };
       }
-      const validActions = ['fixed_response', 'template_response', 'custom', 'set_state', 'sequence'];
+      const validActions = ['fixed_response', 'template_response', 'custom', 'set_state', 'sequence', 'conditional'];
       if (!validActions.includes(rule.action.type)) {
         return { valid: false, error: `规则[${rule.id}]未知动作类型: ${rule.action.type}` };
+      }
+      if (rule.action.type === 'conditional') {
+        if (rule.action.conditions && !Array.isArray(rule.action.conditions)) {
+          return { valid: false, error: `规则[${rule.id}]的 conditions 必须是数组` };
+        }
+        if (rule.action.conditions) {
+          for (let j = 0; j < rule.action.conditions.length; j++) {
+            const cond = rule.action.conditions[j];
+            if (!cond.expression) {
+              return { valid: false, error: `规则[${rule.id}]的条件[${j}]缺少 expression 字段` };
+            }
+            if (!cond.action) {
+              return { valid: false, error: `规则[${rule.id}]的条件[${j}]缺少 action 字段` };
+            }
+            if (!validActions.includes(cond.action.type)) {
+              return { valid: false, error: `规则[${rule.id}]的条件[${j}]未知动作类型: ${cond.action.type}` };
+            }
+          }
+        }
+        if (rule.action.fallback_action && !validActions.includes(rule.action.fallback_action.type)) {
+          return { valid: false, error: `规则[${rule.id}]的 fallback_action 未知动作类型: ${rule.action.fallback_action.type}` };
+        }
+      }
+      if (rule.priority !== undefined && typeof rule.priority !== 'number') {
+        return { valid: false, error: `规则[${rule.id}]的 priority 必须是数字` };
+      }
+      if (rule.exclusive !== undefined && typeof rule.exclusive !== 'boolean') {
+        return { valid: false, error: `规则[${rule.id}]的 exclusive 必须是布尔值` };
       }
     }
     return { valid: true, parsed: obj };
